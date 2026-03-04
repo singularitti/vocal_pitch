@@ -31,3 +31,30 @@ Each row contains:
 - `midi_note`
 - `note_name` (e.g. `A4`)
 - `voiced_ratio`
+
+## Use Your Own Lyrics (No ASR Dependency For Word Boundaries)
+
+If Whisper tokenization is not accurate enough, provide the lyrics text directly.
+This mode detects note events from pitch contour and aligns tokens in order, allowing
+multiple notes per token.
+
+```python
+from vocal_pitch import extract_lyrics_note_mapping, lyrics_note_rows
+
+aligned = extract_lyrics_note_mapping(
+    "your-song.mp3",
+    lyrics_text="红尘醉",
+)
+
+for row in lyrics_note_rows(aligned):
+    print(row)
+```
+
+Each row contains:
+
+- `token`
+- `start_s`, `end_s`
+- `note_count`
+- `notes` (list of note names)
+- `midi_notes` (list)
+- `median_hz` (list)

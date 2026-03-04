@@ -33,3 +33,26 @@ class WordPitch:
     midi_note: float | None
     note_name: str | None
     voiced_ratio: float
+
+
+@dataclass(frozen=True)
+class NoteEvent:
+    """Contiguous sung note segment."""
+
+    start_s: float
+    end_s: float
+    median_hz: float
+    mean_hz: float
+    midi_note: float
+    note_name: str
+    frame_count: int
+
+
+@dataclass(frozen=True)
+class LyricTokenNotes:
+    """Mapping between one lyric token and one-or-more notes."""
+
+    token: str
+    start_s: float
+    end_s: float
+    notes: tuple[NoteEvent, ...]

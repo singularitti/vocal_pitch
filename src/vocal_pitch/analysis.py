@@ -66,6 +66,7 @@ def extract_word_pitches_with_whisper(
     device: str = "cpu",
     compute_type: str = "int8",
     language: str | None = None,
+    vad_filter: bool = False,
     sample_rate: int = 22_050,
 ) -> list[WordPitch]:
     """
@@ -79,6 +80,7 @@ def extract_word_pitches_with_whisper(
             device=device,
             compute_type=compute_type,
             language=language,
+            vad_filter=vad_filter,
         )
 
     return extract_word_pitches(audio_path, transcriber=_transcriber, sample_rate=sample_rate)

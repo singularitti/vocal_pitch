@@ -17,6 +17,7 @@ def transcribe_words_with_faster_whisper(
     device: str = "cpu",
     compute_type: str = "int8",
     language: str | None = None,
+    vad_filter: bool = False,
 ) -> list[WordTiming]:
     """
     Transcribe word timings from audio.
@@ -36,7 +37,7 @@ def transcribe_words_with_faster_whisper(
         str(Path(audio_path)),
         language=language,
         word_timestamps=True,
-        vad_filter=True,
+        vad_filter=vad_filter,
     )
 
     words: list[WordTiming] = []
