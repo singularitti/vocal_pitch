@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from vocal_pitch.audio import load_audio_mono
 from vocal_pitch.models import LyricTokenNotes, NoteEvent, PitchFrame
@@ -299,3 +300,115 @@ def extract_lyrics_note_rows(
         min_note_duration_s=min_note_duration_s,
     )
     return lyrics_note_rows(aligned)
+
+
+def print_lyrics_notes(
+    audio_path: str | Path,
+    lyrics_text: str,
+    *,
+    sample_rate: int = 22_050,
+    pitch_jump_semitones: float = 0.8,
+    max_unvoiced_gap_s: float = 0.05,
+    min_note_duration_s: float = 0.05,
+) -> list[dict[str, float | int | list[float] | list[str] | str]]:
+    """
+    One-call helper that computes and prints token-note rows.
+    """
+    rows = extract_lyrics_note_rows(
+        audio_path,
+        lyrics_text,
+        sample_rate=sample_rate,
+        pitch_jump_semitones=pitch_jump_semitones,
+        max_unvoiced_gap_s=max_unvoiced_gap_s,
+        min_note_duration_s=min_note_duration_s,
+    )
+    for row in rows:
+        print(row)
+    return rows
+
+
+def lyrics_note_dataframe(
+    aligned: Sequence[LyricTokenNotes],
+    *,
+    explode_notes: bool = True,
+) -> pd.DataFrame:
+    """
+    Convert token-note mappings into a pandas DataFrame.
+    """
+    records: list[dict[str, str | float | int | None]] = []
+    for token_index, item in enumerate(aligned):
+        if explode_notes:
+            if item.notes:
+                for note_index, note in enumerate(item.notes):
+                    records.append(
+                        {
+                            "token_index": token_index,
+                            "token": item.token,
+                            "token_start_s": round(item.start_s, 3),
+                            "token_end_s": round(item.end_s, 3),
+                            "note_index": note_index,
+                            "note_start_s": round(note.start_s, 3),
+                            "note_end_s": round(note.end_s, 3),
+                            "note_name": note.note_name,
+                            "midi_note": round(note.midi_note, 2),
+                            "median_hz": round(note.median_hz, 2),
+                            "mean_hz": round(note.mean_hz, 2),
+                            "frame_count": note.frame_count,
+                        }
+                    )
+            else:
+                records.append(
+                    {
+                        "token_index": token_index,
+                        "token": item.token,
+                        "token_start_s": round(item.start_s, 3),
+                        "token_end_s": round(item.end_s, 3),
+                        "note_index": None,
+                        "note_start_s": None,
+                        "note_end_s": None,
+                        "note_name": None,
+                        "midi_note": None,
+                        "median_hz": None,
+                        "mean_hz": None,
+                        "frame_count": 0,
+                    }
+                )
+            continue
+
+        records.append(
+            {
+                "token_index": token_index,
+                "token": item.token,
+                "token_start_s": round(item.start_s, 3),
+                "token_end_s": round(item.end_s, 3),
+                "note_count": len(item.notes),
+                "notes": ",".join(n.note_name for n in item.notes),
+                "midi_notes": ",".join(f"{n.midi_note:.2f}" for n in item.notes),
+                "median_hz": ",".join(f"{n.median_hz:.2f}" for n in item.notes),
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def extract_lyrics_notes_df(
+    audio_path: str | Path,
+    lyrics_text: str,
+    *,
+    sample_rate: int = 22_050,
+    pitch_jump_semitones: float = 0.8,
+    max_unvoiced_gap_s: float = 0.05,
+    min_note_duration_s: float = 0.05,
+    explode_notes: bool = True,
+) -> pd.DataFrame:
+    """
+    One-call helper that returns a DataFrame for `audio_path` + `lyrics_text`.
+    """
+    aligned = extract_lyrics_note_mapping(
+        audio_path,
+        lyrics_text,
+        sample_rate=sample_rate,
+        pitch_jump_semitones=pitch_jump_semitones,
+        max_unvoiced_gap_s=max_unvoiced_gap_s,
+        min_note_duration_s=min_note_duration_s,
+    )
+    return lyrics_note_dataframe(aligned, explode_notes=explode_notes)

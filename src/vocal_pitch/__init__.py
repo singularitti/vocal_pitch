@@ -3,7 +3,15 @@ from vocal_pitch.analysis import (
     extract_word_pitches_with_whisper,
     word_pitch_rows,
 )
-from vocal_pitch.lyrics import extract_lyrics_note_mapping, lyrics_note_rows, tokenize_lyrics
+from vocal_pitch.lyrics import (
+    extract_lyrics_notes_df,
+    extract_lyrics_note_mapping,
+    extract_lyrics_note_rows,
+    lyrics_note_dataframe,
+    lyrics_note_rows,
+    print_lyrics_notes,
+    tokenize_lyrics,
+)
 from vocal_pitch.models import LyricTokenNotes, NoteEvent, PitchFrame, WordPitch, WordTiming
 
 __all__ = [
@@ -14,8 +22,12 @@ __all__ = [
     "WordTiming",
     "extract_word_pitches",
     "extract_word_pitches_with_whisper",
+    "extract_lyrics_notes_df",
     "extract_lyrics_note_mapping",
+    "extract_lyrics_note_rows",
+    "lyrics_note_dataframe",
     "lyrics_note_rows",
+    "print_lyrics_notes",
     "tokenize_lyrics",
     "word_pitch_rows",
 ]

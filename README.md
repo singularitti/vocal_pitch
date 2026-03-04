@@ -1,6 +1,7 @@
 ## vocal-pitch
 
 Function-first project for extracting per-word sung pitch from solo vocal audio.
+Supports common formats such as `mp3`, `m4a`, and `wav`.
 
 ## Install
 
@@ -49,6 +50,50 @@ aligned = extract_lyrics_note_mapping(
 for row in lyrics_note_rows(aligned):
     print(row)
 ```
+
+Simpler one-call API:
+
+```python
+from vocal_pitch import extract_lyrics_note_rows
+
+for row in extract_lyrics_note_rows(
+    "your-song.mp3",
+    lyrics_text="喔 詹德 為什麼 沒有 聲音",
+):
+    print(row)
+```
+
+If you want it to print directly:
+
+```python
+from vocal_pitch import print_lyrics_notes
+
+print_lyrics_notes(
+    "your-song.mp3",
+    lyrics_text="喔 詹德 為什麼 沒有 聲音",
+)
+```
+
+If you prefer a `DataFrame`:
+
+```python
+from vocal_pitch import extract_lyrics_notes_df
+
+df = extract_lyrics_notes_df(
+    "your-song.mp3",
+    lyrics_text="喔 詹德 為什麼 沒有 聲音",
+)
+```
+
+`df` columns (default exploded format) include:
+
+- `token_index`, `token`
+- `token_start_s`, `token_end_s`
+- `note_index`
+- `note_start_s`, `note_end_s`
+- `note_name`, `midi_note`
+- `median_hz`, `mean_hz`
+- `frame_count`
 
 Each row contains:
 
