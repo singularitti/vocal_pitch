@@ -58,10 +58,15 @@ from vocal_pitch import extract_lyrics_note_rows
 
 for row in extract_lyrics_note_rows(
     "your-song.mp3",
-    lyrics_text="喔 詹德 為什麼 沒有 聲音",
+    lyrics_text="喔詹德為什麼沒有聲音",
 ):
     print(row)
 ```
+
+Tokenization behavior:
+
+- Default: `respect_spaces=False` (spaces do not change CJK char-level parsing).
+- Optional: set `respect_spaces=True` if you want whitespace chunks treated as custom tokens.
 
 If you want it to print directly:
 

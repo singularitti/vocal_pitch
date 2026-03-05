@@ -7,6 +7,14 @@ def test_tokenize_lyrics_cjk_without_spaces() -> None:
     assert lyrics.tokenize_lyrics("红尘醉") == ["红", "尘", "醉"]
 
 
+def test_tokenize_lyrics_ignores_spaces_by_default() -> None:
+    assert lyrics.tokenize_lyrics("红尘 醉") == ["红", "尘", "醉"]
+
+
+def test_tokenize_lyrics_respects_spaces_when_requested() -> None:
+    assert lyrics.tokenize_lyrics("红尘 醉", respect_spaces=True) == ["红尘", "醉"]
+
+
 def test_detect_note_events_split_by_pitch_jump() -> None:
     contour = [
         PitchFrame(time_s=0.00, frequency_hz=440.0),

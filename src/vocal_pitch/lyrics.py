@@ -29,31 +29,16 @@ def _is_token_delimiter(ch: str) -> bool:
     return cat.startswith("P") or cat.startswith("S")
 
 
-def tokenize_lyrics(lyrics_text: str) -> list[str]:
-    """
-    Split provided lyrics into tokens.
-
-    Rules:
-    - If the text has spaces, split by spaces.
-    - For CJK without spaces, split by character.
-    - Non-CJK runs stay grouped (e.g., latin words).
-    """
-    stripped = lyrics_text.strip()
-    if not stripped:
-        return []
-
-    if any(ch.isspace() for ch in stripped):
-        return [tok for tok in stripped.split() if tok]
-
+def _tokenize_stream(text: str, *, split_cjk: bool) -> list[str]:
     tokens: list[str] = []
     buffer: list[str] = []
-    for ch in stripped:
+    for ch in text:
         if _is_token_delimiter(ch):
             if buffer:
                 tokens.append("".join(buffer))
                 buffer.clear()
             continue
-        if _is_cjk_char(ch):
+        if split_cjk and _is_cjk_char(ch):
             if buffer:
                 tokens.append("".join(buffer))
                 buffer.clear()
@@ -63,6 +48,29 @@ def tokenize_lyrics(lyrics_text: str) -> list[str]:
 
     if buffer:
         tokens.append("".join(buffer))
+    return tokens
+
+
+def tokenize_lyrics(lyrics_text: str, *, respect_spaces: bool = False) -> list[str]:
+    """
+    Split provided lyrics into tokens.
+
+    Rules:
+    - Default (`respect_spaces=False`): spaces are ignored as separators; CJK is
+      split by character so accidental spaces do not change parsing.
+    - With `respect_spaces=True`: each whitespace-separated chunk is kept as one
+      token (after punctuation cleanup), useful for custom multi-char words.
+    """
+    stripped = lyrics_text.strip()
+    if not stripped:
+        return []
+
+    if not respect_spaces:
+        return _tokenize_stream(stripped, split_cjk=True)
+
+    tokens: list[str] = []
+    for chunk in stripped.split():
+        tokens.extend(_tokenize_stream(chunk, split_cjk=False))
     return tokens
 
 
@@ -238,6 +246,7 @@ def extract_lyrics_note_mapping(
     lyrics_text: str,
     *,
     sample_rate: int = 22_050,
+    respect_spaces: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -245,7 +254,7 @@ def extract_lyrics_note_mapping(
     """
     Map user-provided lyrics text to detected sung note events.
     """
-    tokens = tokenize_lyrics(lyrics_text)
+    tokens = tokenize_lyrics(lyrics_text, respect_spaces=respect_spaces)
     waveform, sr = load_audio_mono(audio_path, sample_rate=sample_rate)
     contour = estimate_pitch_contour(waveform, sr)
     note_events = detect_note_events(
@@ -284,6 +293,7 @@ def extract_lyrics_note_rows(
     lyrics_text: str,
     *,
     sample_rate: int = 22_050,
+    respect_spaces: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -295,6 +305,7 @@ def extract_lyrics_note_rows(
         audio_path,
         lyrics_text,
         sample_rate=sample_rate,
+        respect_spaces=respect_spaces,
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
@@ -307,6 +318,7 @@ def print_lyrics_notes(
     lyrics_text: str,
     *,
     sample_rate: int = 22_050,
+    respect_spaces: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -318,6 +330,7 @@ def print_lyrics_notes(
         audio_path,
         lyrics_text,
         sample_rate=sample_rate,
+        respect_spaces=respect_spaces,
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
@@ -395,6 +408,7 @@ def extract_lyrics_notes_df(
     lyrics_text: str,
     *,
     sample_rate: int = 22_050,
+    respect_spaces: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -407,6 +421,7 @@ def extract_lyrics_notes_df(
         audio_path,
         lyrics_text,
         sample_rate=sample_rate,
+        respect_spaces=respect_spaces,
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
