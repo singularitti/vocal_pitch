@@ -1,6 +1,7 @@
 import vocal_pitch.lyrics as lyrics
 import pandas as pd
-from vocal_pitch.models import LyricTokenNotes, NoteEvent, PitchFrame
+import numpy as np
+from vocal_pitch.models import AudioClip, LyricTokenInspection, LyricTokenNotes, NoteEvent, PitchFrame
 
 
 def test_tokenize_lyrics_cjk_without_spaces() -> None:
@@ -112,6 +113,25 @@ def test_lyrics_note_dataframe_exploded() -> None:
     assert list(df["token"]) == ["你", "你", "好"]
     assert list(df["note_name"][:2]) == ["A4", "B4"]
     assert pd.isna(df["note_name"].iloc[2])
+    assert list(df["token_time_range"][:2]) == ["0.000-0.400", "0.000-0.400"]
+    assert list(df["note_time_range"][:2]) == ["0.000-0.200", "0.200-0.400"]
+
+
+def test_lyrics_note_dataframe_compact_has_time_summary() -> None:
+    aligned = [
+        LyricTokenNotes(
+            token="你",
+            start_s=0.1,
+            end_s=0.35,
+            notes=(NoteEvent(0.1, 0.35, 440.0, 441.0, 69.0, "A4", 8),),
+        )
+    ]
+
+    df = lyrics.lyrics_note_dataframe(aligned, explode_notes=False)
+
+    assert list(df["token_duration_s"]) == [0.25]
+    assert list(df["token_time_range"]) == ["0.100-0.350"]
+    assert list(df["notes"]) == ["A4"]
 
 
 def test_extract_lyrics_notes_df_wrapper(monkeypatch) -> None:
@@ -123,3 +143,158 @@ def test_extract_lyrics_notes_df_wrapper(monkeypatch) -> None:
     monkeypatch.setattr(lyrics, "extract_lyrics_note_mapping", fake_extract)
     df = lyrics.extract_lyrics_notes_df("dummy.mp3", "你")
     assert list(df["token"]) == ["你"]
+
+
+def test_extract_lyrics_mapping_with_optional_vocal_separation(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_separate(path: str, **kwargs):
+        calls["separated_from"] = path
+        calls["separation_kwargs"] = kwargs
+        return "vocals.wav"
+
+    monkeypatch.setattr(lyrics, "separate_vocals_with_demucs", fake_separate)
+    monkeypatch.setattr(
+        lyrics,
+        "load_audio_mono",
+        lambda path, sample_rate: (np.zeros(32, dtype=np.float32), sample_rate),
+    )
+    monkeypatch.setattr(lyrics, "estimate_pitch_contour", lambda _wave, _sr: [])
+    monkeypatch.setattr(lyrics, "detect_note_events", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        lyrics,
+        "align_tokens_to_notes",
+        lambda tokens, _notes: [
+            LyricTokenNotes(token=t, start_s=0.0, end_s=0.0, notes=tuple()) for t in tokens
+        ],
+    )
+
+    aligned = lyrics.extract_lyrics_note_mapping(
+        "mixed.mp3",
+        "你好",
+        separate_vocals=True,
+        separation_model="htdemucs_ft",
+    )
+    assert [x.token for x in aligned] == ["你", "好"]
+    assert calls["separated_from"] == "mixed.mp3"
+    assert calls["separation_kwargs"] == {
+        "model_name": "htdemucs_ft",
+        "output_dir": None,
+        "overwrite": False,
+    }
+
+
+def test_inspect_lyrics_token_returns_clip(monkeypatch) -> None:
+    fake_aligned = [
+        LyricTokenNotes(
+            token="你",
+            start_s=0.4,
+            end_s=0.5,
+            notes=(NoteEvent(0.4, 0.5, 440.0, 440.0, 69.0, "A4", 4),),
+        ),
+        LyricTokenNotes(token="好", start_s=0.5, end_s=0.8, notes=tuple()),
+    ]
+    calls: dict[str, object] = {}
+
+    def fake_extract(*_args, **_kwargs):
+        return fake_aligned
+
+    def fake_slice(*_args, **kwargs):
+        calls["slice_kwargs"] = kwargs
+        return np.asarray([0.1, 0.2], dtype=np.float32), 22_050, 0.275, 0.625
+
+    monkeypatch.setattr(lyrics, "extract_lyrics_note_mapping", fake_extract)
+    monkeypatch.setattr(lyrics, "slice_audio_mono", fake_slice)
+
+    inspection = lyrics.inspect_lyrics_token("dummy.mp3", "你好", 0)
+
+    assert inspection.token_index == 0
+    assert inspection.token == "你"
+    assert inspection.start_s == 0.4
+    assert inspection.end_s == 0.5
+    assert inspection.notes == fake_aligned[0].notes
+    assert inspection.clip.sample_rate == 22_050
+    assert inspection.clip.start_s == 0.275
+    assert inspection.clip.end_s == 0.625
+    assert np.allclose(inspection.clip.waveform, np.asarray([0.1, 0.2], dtype=np.float32))
+    assert calls["slice_kwargs"] == {
+        "start_s": 0.325,
+        "end_s": 0.575,
+        "sample_rate": 22_050,
+        "pad_s": 0.05,
+    }
+
+
+def test_inspect_lyrics_token_uses_dataframe_without_recomputing(monkeypatch) -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "token_index": 0,
+                "token": "你",
+                "token_start_s": 0.4,
+                "token_end_s": 0.5,
+                "note_index": 0,
+                "note_start_s": 0.4,
+                "note_end_s": 0.5,
+                "note_name": "A4",
+                "midi_note": 69.0,
+                "median_hz": 440.0,
+                "mean_hz": 440.5,
+                "frame_count": 4,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        lyrics,
+        "extract_lyrics_note_mapping",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not recompute")),
+    )
+    monkeypatch.setattr(
+        lyrics,
+        "slice_audio_mono",
+        lambda *_args, **_kwargs: (np.asarray([0.1], dtype=np.float32), 22_050, 0.35, 0.55),
+    )
+
+    inspection = lyrics.inspect_lyrics_token("dummy.mp3", df, 0)
+
+    assert inspection.token == "你"
+    assert inspection.notes[0].note_name == "A4"
+    assert inspection.token_index == 0
+
+
+def test_play_lyrics_token_uses_audio_backend(monkeypatch) -> None:
+    fake_inspection = LyricTokenInspection(
+        token_index=0,
+        token="你",
+        start_s=0.0,
+        end_s=0.2,
+        notes=tuple(),
+        clip=AudioClip(
+            waveform=np.asarray([0.1, 0.2], dtype=np.float32),
+            sample_rate=16_000,
+            start_s=0.0,
+            end_s=0.2,
+        ),
+    )
+
+    monkeypatch.setattr(lyrics, "inspect_lyrics_token", lambda *_args, **_kwargs: fake_inspection)
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(
+        lyrics,
+        "play_waveform",
+        lambda waveform, sample_rate, *, backend, autoplay: calls.update(
+            waveform=waveform,
+            sample_rate=sample_rate,
+            backend=backend,
+            autoplay=autoplay,
+        )
+        or "played",
+    )
+
+    audio_obj = lyrics.play_lyrics_token("dummy.mp3", "你", 0, backend="afplay", autoplay=True)
+
+    assert audio_obj == "played"
+    assert np.allclose(calls["waveform"], np.asarray([0.1, 0.2], dtype=np.float32))
+    assert calls["sample_rate"] == 16_000
+    assert calls["backend"] == "afplay"
+    assert calls["autoplay"] is True

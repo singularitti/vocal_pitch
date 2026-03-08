@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "singularitti", email = "singularitti@outlook.com" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "av>=16.0.0",
     "librosa>=0.11.0",
@@ -18,6 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 transcribe = [
     "faster-whisper>=1.1.0",
+]
+separation = [
+    "demucs>=4.0.1",
+    "torchcodec>=0.8.0",
 ]
 dev = [
     "pytest>=8.3.0",

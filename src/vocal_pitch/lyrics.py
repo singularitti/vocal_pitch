@@ -4,13 +4,17 @@ import math
 import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
 import pandas as pd
 
-from vocal_pitch.audio import load_audio_mono
-from vocal_pitch.models import LyricTokenNotes, NoteEvent, PitchFrame
+from vocal_pitch.audio import load_audio_mono, play_waveform, slice_audio_mono
+from vocal_pitch.models import AudioClip, LyricTokenInspection, LyricTokenNotes, NoteEvent, PitchFrame
 from vocal_pitch.pitch import estimate_pitch_contour, hz_to_midi_note, midi_to_note_name
+from vocal_pitch.separation import separate_vocals_with_demucs
+
+LyricsInspectionSource: TypeAlias = str | Sequence[LyricTokenNotes] | pd.DataFrame
 
 
 def _is_cjk_char(ch: str) -> bool:
@@ -164,6 +168,142 @@ def _token_weights(tokens: Sequence[str]) -> list[float]:
     return weights
 
 
+def _resolve_lyrics_source_audio_path(
+    audio_path: str | Path,
+    *,
+    separate_vocals: bool,
+    separation_model: str,
+    separation_output_dir: str | Path | None,
+    separation_overwrite: bool,
+) -> str | Path:
+    source_audio_path: str | Path = audio_path
+    if separate_vocals:
+        source_audio_path = separate_vocals_with_demucs(
+            audio_path,
+            model_name=separation_model,
+            output_dir=separation_output_dir,
+            overwrite=separation_overwrite,
+        )
+    return source_audio_path
+
+
+def _format_time_range(start_s: float, end_s: float) -> str:
+    return f"{start_s:.3f}-{end_s:.3f}"
+
+
+def _normalize_token_index(token_index: int, token_count: int) -> int:
+    normalized_index = token_index if token_index >= 0 else token_count + token_index
+    if not 0 <= normalized_index < token_count:
+        raise IndexError(
+            f"`token_index` {token_index} is out of range for {token_count} tokens."
+        )
+    return normalized_index
+
+
+def _note_event_from_series(row: pd.Series) -> NoteEvent | None:
+    required = (
+        "note_start_s",
+        "note_end_s",
+        "median_hz",
+        "mean_hz",
+        "midi_note",
+        "note_name",
+        "frame_count",
+    )
+    if any(column not in row.index for column in required):
+        return None
+    if any(pd.isna(row[column]) for column in required):
+        return None
+    return NoteEvent(
+        start_s=float(row["note_start_s"]),
+        end_s=float(row["note_end_s"]),
+        median_hz=float(row["median_hz"]),
+        mean_hz=float(row["mean_hz"]),
+        midi_note=float(row["midi_note"]),
+        note_name=str(row["note_name"]),
+        frame_count=int(row["frame_count"]),
+    )
+
+
+def _inspect_from_dataframe(df: pd.DataFrame, token_index: int) -> tuple[int, LyricTokenNotes]:
+    if "token_index" not in df.columns:
+        raise ValueError("DataFrame must include a `token_index` column.")
+
+    required = ("token", "token_start_s", "token_end_s")
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise ValueError(f"DataFrame is missing required columns: {', '.join(missing)}")
+
+    token_values = df["token_index"].dropna().astype(int).drop_duplicates().tolist()
+    normalized_offset = _normalize_token_index(token_index, len(token_values))
+    resolved_token_index = token_values[normalized_offset]
+    token_rows = df.loc[df["token_index"] == resolved_token_index]
+    if token_rows.empty:
+        raise IndexError(f"`token_index` {token_index} was not found in the DataFrame.")
+
+    note_rows = token_rows
+    if "note_index" in token_rows.columns:
+        note_rows = token_rows.sort_values("note_index", na_position="last")
+
+    notes = tuple(
+        note
+        for note in (_note_event_from_series(row) for _, row in note_rows.iterrows())
+        if note is not None
+    )
+    first = token_rows.iloc[0]
+    return resolved_token_index, LyricTokenNotes(
+        token=str(first["token"]),
+        start_s=float(first["token_start_s"]),
+        end_s=float(first["token_end_s"]),
+        notes=notes,
+    )
+
+
+def _resolve_lyrics_token_source(
+    audio_path: str | Path,
+    source: LyricsInspectionSource,
+    *,
+    sample_rate: int,
+    respect_spaces: bool,
+    separate_vocals: bool,
+    separation_model: str,
+    separation_output_dir: str | Path | None,
+    separation_overwrite: bool,
+    pitch_jump_semitones: float,
+    max_unvoiced_gap_s: float,
+    min_note_duration_s: float,
+    token_index: int,
+) -> tuple[str | Path, int, LyricTokenNotes]:
+    source_audio_path = _resolve_lyrics_source_audio_path(
+        audio_path,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
+    )
+
+    if isinstance(source, pd.DataFrame):
+        resolved_index, item = _inspect_from_dataframe(source, token_index)
+        return source_audio_path, resolved_index, item
+
+    if isinstance(source, str):
+        aligned = extract_lyrics_note_mapping(
+            source_audio_path,
+            source,
+            sample_rate=sample_rate,
+            respect_spaces=respect_spaces,
+            separate_vocals=False,
+            pitch_jump_semitones=pitch_jump_semitones,
+            max_unvoiced_gap_s=max_unvoiced_gap_s,
+            min_note_duration_s=min_note_duration_s,
+        )
+    else:
+        aligned = list(source)
+
+    normalized_index = _normalize_token_index(token_index, len(aligned))
+    return source_audio_path, normalized_index, aligned[normalized_index]
+
+
 def align_tokens_to_notes(tokens: Sequence[str], notes: Sequence[NoteEvent]) -> list[LyricTokenNotes]:
     """
     Assign contiguous note ranges to each token.
@@ -247,6 +387,10 @@ def extract_lyrics_note_mapping(
     *,
     sample_rate: int = 22_050,
     respect_spaces: bool = False,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -254,8 +398,16 @@ def extract_lyrics_note_mapping(
     """
     Map user-provided lyrics text to detected sung note events.
     """
+    source_audio_path = _resolve_lyrics_source_audio_path(
+        audio_path,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
+    )
+
     tokens = tokenize_lyrics(lyrics_text, respect_spaces=respect_spaces)
-    waveform, sr = load_audio_mono(audio_path, sample_rate=sample_rate)
+    waveform, sr = load_audio_mono(source_audio_path, sample_rate=sample_rate)
     contour = estimate_pitch_contour(waveform, sr)
     note_events = detect_note_events(
         contour,
@@ -294,6 +446,10 @@ def extract_lyrics_note_rows(
     *,
     sample_rate: int = 22_050,
     respect_spaces: bool = False,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -306,6 +462,10 @@ def extract_lyrics_note_rows(
         lyrics_text,
         sample_rate=sample_rate,
         respect_spaces=respect_spaces,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
@@ -319,6 +479,10 @@ def print_lyrics_notes(
     *,
     sample_rate: int = 22_050,
     respect_spaces: bool = False,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -331,6 +495,10 @@ def print_lyrics_notes(
         lyrics_text,
         sample_rate=sample_rate,
         respect_spaces=respect_spaces,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
@@ -350,6 +518,8 @@ def lyrics_note_dataframe(
     """
     records: list[dict[str, str | float | int | None]] = []
     for token_index, item in enumerate(aligned):
+        token_duration_s = round(item.end_s - item.start_s, 3)
+        token_time_range = _format_time_range(item.start_s, item.end_s)
         if explode_notes:
             if item.notes:
                 for note_index, note in enumerate(item.notes):
@@ -359,9 +529,13 @@ def lyrics_note_dataframe(
                             "token": item.token,
                             "token_start_s": round(item.start_s, 3),
                             "token_end_s": round(item.end_s, 3),
+                            "token_duration_s": token_duration_s,
+                            "token_time_range": token_time_range,
                             "note_index": note_index,
                             "note_start_s": round(note.start_s, 3),
                             "note_end_s": round(note.end_s, 3),
+                            "note_duration_s": round(note.end_s - note.start_s, 3),
+                            "note_time_range": _format_time_range(note.start_s, note.end_s),
                             "note_name": note.note_name,
                             "midi_note": round(note.midi_note, 2),
                             "median_hz": round(note.median_hz, 2),
@@ -376,9 +550,13 @@ def lyrics_note_dataframe(
                         "token": item.token,
                         "token_start_s": round(item.start_s, 3),
                         "token_end_s": round(item.end_s, 3),
+                        "token_duration_s": token_duration_s,
+                        "token_time_range": token_time_range,
                         "note_index": None,
                         "note_start_s": None,
                         "note_end_s": None,
+                        "note_duration_s": None,
+                        "note_time_range": None,
                         "note_name": None,
                         "midi_note": None,
                         "median_hz": None,
@@ -394,6 +572,8 @@ def lyrics_note_dataframe(
                 "token": item.token,
                 "token_start_s": round(item.start_s, 3),
                 "token_end_s": round(item.end_s, 3),
+                "token_duration_s": token_duration_s,
+                "token_time_range": token_time_range,
                 "note_count": len(item.notes),
                 "notes": ",".join(n.note_name for n in item.notes),
                 "midi_notes": ",".join(f"{n.midi_note:.2f}" for n in item.notes),
@@ -403,12 +583,136 @@ def lyrics_note_dataframe(
     return pd.DataFrame.from_records(records)
 
 
+def inspect_lyrics_token(
+    audio_path: str | Path,
+    source: LyricsInspectionSource,
+    token_index: int,
+    *,
+    sample_rate: int = 22_050,
+    respect_spaces: bool = False,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
+    pitch_jump_semitones: float = 0.8,
+    max_unvoiced_gap_s: float = 0.05,
+    min_note_duration_s: float = 0.05,
+    preview_pad_s: float = 0.05,
+    min_preview_duration_s: float = 0.25,
+) -> LyricTokenInspection:
+    """
+    Return one token plus a preview audio clip for manual inspection.
+
+    `source` can be the original lyrics text, the aligned token mapping, or the
+    DataFrame returned by `extract_lyrics_notes_df(...)`.
+    """
+    if min_preview_duration_s < 0:
+        raise ValueError("`min_preview_duration_s` must be >= 0.")
+
+    source_audio_path, resolved_token_index, item = _resolve_lyrics_token_source(
+        audio_path,
+        source,
+        sample_rate=sample_rate,
+        respect_spaces=respect_spaces,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
+        pitch_jump_semitones=pitch_jump_semitones,
+        max_unvoiced_gap_s=max_unvoiced_gap_s,
+        min_note_duration_s=min_note_duration_s,
+        token_index=token_index,
+    )
+
+    window_start_s = item.start_s
+    window_end_s = item.end_s
+    if (window_end_s - window_start_s) < min_preview_duration_s:
+        center_s = (window_start_s + window_end_s) / 2.0
+        half_window_s = min_preview_duration_s / 2.0
+        window_start_s = max(0.0, center_s - half_window_s)
+        window_end_s = center_s + half_window_s
+
+    clip_waveform, clip_sr, clip_start_s, clip_end_s = slice_audio_mono(
+        source_audio_path,
+        start_s=window_start_s,
+        end_s=window_end_s,
+        sample_rate=sample_rate,
+        pad_s=preview_pad_s,
+    )
+    return LyricTokenInspection(
+        token_index=resolved_token_index,
+        token=item.token,
+        start_s=item.start_s,
+        end_s=item.end_s,
+        notes=item.notes,
+        clip=AudioClip(
+            waveform=clip_waveform,
+            sample_rate=clip_sr,
+            start_s=clip_start_s,
+            end_s=clip_end_s,
+        ),
+    )
+
+
+def play_lyrics_token(
+    audio_path: str | Path,
+    source: LyricsInspectionSource,
+    token_index: int,
+    *,
+    backend: str = "auto",
+    autoplay: bool = False,
+    sample_rate: int = 22_050,
+    respect_spaces: bool = False,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
+    pitch_jump_semitones: float = 0.8,
+    max_unvoiced_gap_s: float = 0.05,
+    min_note_duration_s: float = 0.05,
+    preview_pad_s: float = 0.05,
+    min_preview_duration_s: float = 0.25,
+) -> object:
+    """
+    Play a lyric token clip.
+
+    With `backend="auto"`, a local CLI player is preferred. If none is
+    available, it falls back to `IPython.display.Audio`.
+    """
+    inspection = inspect_lyrics_token(
+        audio_path,
+        source,
+        token_index,
+        sample_rate=sample_rate,
+        respect_spaces=respect_spaces,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
+        pitch_jump_semitones=pitch_jump_semitones,
+        max_unvoiced_gap_s=max_unvoiced_gap_s,
+        min_note_duration_s=min_note_duration_s,
+        preview_pad_s=preview_pad_s,
+        min_preview_duration_s=min_preview_duration_s,
+    )
+    return play_waveform(
+        inspection.clip.waveform,
+        inspection.clip.sample_rate,
+        backend=backend,
+        autoplay=autoplay,
+    )
+
+
 def extract_lyrics_notes_df(
     audio_path: str | Path,
     lyrics_text: str,
     *,
     sample_rate: int = 22_050,
     respect_spaces: bool = False,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
@@ -422,6 +726,10 @@ def extract_lyrics_notes_df(
         lyrics_text,
         sample_rate=sample_rate,
         respect_spaces=respect_spaces,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,

@@ -9,6 +9,17 @@ Supports common formats such as `mp3`, `m4a`, and `wav`.
 uv sync --extra transcribe --extra dev
 ```
 
+For vocal/background separation, also install:
+
+```bash
+uv sync --extra separation
+```
+
+`separation` uses `demucs`, which currently requires Python `<3.14`.
+This project is pinned to Python `3.13` via `.python-version`.
+If Demucs reports missing `torchcodec`, run `uv sync --extra separation` again
+after pulling latest `pyproject.toml`.
+
 ## Use in Python
 
 ```python
@@ -87,6 +98,20 @@ from vocal_pitch import extract_lyrics_notes_df
 df = extract_lyrics_notes_df(
     "your-song.mp3",
     lyrics_text="喔 詹德 為什麼 沒有 聲音",
+    explode_notes=False,
+)
+```
+
+With background music, enable vocal separation first:
+
+```python
+from vocal_pitch import extract_lyrics_notes_df
+
+df = extract_lyrics_notes_df(
+    "your-song-with-piano.m4a",
+    lyrics_text="喔 詹德 為什麼 沒有 聲音",
+    separate_vocals=True,
+    separation_model="htdemucs",
 )
 ```
 
@@ -94,11 +119,42 @@ df = extract_lyrics_notes_df(
 
 - `token_index`, `token`
 - `token_start_s`, `token_end_s`
+- `token_duration_s`, `token_time_range`
 - `note_index`
 - `note_start_s`, `note_end_s`
+- `note_duration_s`, `note_time_range`
 - `note_name`, `midi_note`
 - `median_hz`, `mean_hz`
 - `frame_count`
+
+If you want a more compact table, set `explode_notes=False`. That gives one row
+per lyric token, with joined note summaries and the token time range.
+
+If one token looks suspicious and you want to hear just that time span:
+
+```python
+from vocal_pitch import inspect_lyrics_token, play_lyrics_token
+
+inspection = inspect_lyrics_token(
+    "your-song.mp3",
+    df,
+    token_index=2,
+    preview_pad_s=0.08,
+)
+
+print(inspection.token, inspection.start_s, inspection.end_s)
+print([note.note_name for note in inspection.notes])
+
+play_lyrics_token(
+    "your-song.mp3",
+    df,
+    token_index=2,
+)
+```
+
+Passing the existing `df` avoids recomputing alignment just to inspect one token.
+`play_lyrics_token(...)` prefers a local player such as `afplay`/`ffplay`; if no
+CLI player is available, it falls back to `IPython.display.Audio`.
 
 Each row contains:
 

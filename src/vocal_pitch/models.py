@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class PitchFrame:
@@ -49,6 +51,16 @@ class NoteEvent:
 
 
 @dataclass(frozen=True)
+class AudioClip:
+    """Mono audio clip extracted from a time window."""
+
+    waveform: np.ndarray
+    sample_rate: int
+    start_s: float
+    end_s: float
+
+
+@dataclass(frozen=True)
 class LyricTokenNotes:
     """Mapping between one lyric token and one-or-more notes."""
 
@@ -56,3 +68,15 @@ class LyricTokenNotes:
     start_s: float
     end_s: float
     notes: tuple[NoteEvent, ...]
+
+
+@dataclass(frozen=True)
+class LyricTokenInspection:
+    """Inspectable lyric token with note metadata and preview audio."""
+
+    token_index: int
+    token: str
+    start_s: float
+    end_s: float
+    notes: tuple[NoteEvent, ...]
+    clip: AudioClip

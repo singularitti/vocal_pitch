@@ -11,6 +11,7 @@ from vocal_pitch.pitch import (
     midi_to_note_name,
     summarize_pitch_for_window,
 )
+from vocal_pitch.separation import separate_vocals_with_demucs
 from vocal_pitch.transcript import transcribe_words_with_faster_whisper
 
 WordTranscriber = Callable[[str | Path], Sequence[WordTiming]]
@@ -22,18 +23,31 @@ def extract_word_pitches(
     words: Sequence[WordTiming] | None = None,
     transcriber: WordTranscriber | None = None,
     sample_rate: int = 22_050,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
 ) -> list[WordPitch]:
     """
     Extract pitch summary for each word in a vocal recording.
 
     If `words` is omitted, provide `transcriber` to create word timings first.
     """
+    source_audio_path: str | Path = audio_path
+    if separate_vocals:
+        source_audio_path = separate_vocals_with_demucs(
+            audio_path,
+            model_name=separation_model,
+            output_dir=separation_output_dir,
+            overwrite=separation_overwrite,
+        )
+
     if words is None:
         if transcriber is None:
             raise ValueError("Either `words` or `transcriber` must be provided.")
-        words = transcriber(audio_path)
+        words = transcriber(source_audio_path)
 
-    waveform, sr = load_audio_mono(audio_path, sample_rate=sample_rate)
+    waveform, sr = load_audio_mono(source_audio_path, sample_rate=sample_rate)
     contour = estimate_pitch_contour(waveform, sr)
 
     results: list[WordPitch] = []
@@ -68,6 +82,10 @@ def extract_word_pitches_with_whisper(
     language: str | None = None,
     vad_filter: bool = False,
     sample_rate: int = 22_050,
+    separate_vocals: bool = False,
+    separation_model: str = "htdemucs",
+    separation_output_dir: str | Path | None = None,
+    separation_overwrite: bool = False,
 ) -> list[WordPitch]:
     """
     End-to-end helper: word transcription + pitch extraction.
@@ -83,7 +101,15 @@ def extract_word_pitches_with_whisper(
             vad_filter=vad_filter,
         )
 
-    return extract_word_pitches(audio_path, transcriber=_transcriber, sample_rate=sample_rate)
+    return extract_word_pitches(
+        audio_path,
+        transcriber=_transcriber,
+        sample_rate=sample_rate,
+        separate_vocals=separate_vocals,
+        separation_model=separation_model,
+        separation_output_dir=separation_output_dir,
+        separation_overwrite=separation_overwrite,
+    )
 
 
 def word_pitch_rows(word_pitches: Sequence[WordPitch]) -> list[dict[str, float | str | None]]:
