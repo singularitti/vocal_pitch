@@ -112,6 +112,7 @@ def detect_note_events(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
 ) -> list[NoteEvent]:
     """
     Split pitch contour into contiguous note events.
@@ -125,6 +126,15 @@ def detect_note_events(
         nonlocal current
         if not current:
             return
+        if min_note_confidence is not None:
+            confidences = [
+                frame.confidence
+                for frame in current
+                if frame.frequency_hz is not None and frame.confidence is not None
+            ]
+            if confidences and float(np.mean(confidences)) < min_note_confidence:
+                current = []
+                return
         event = _to_note_event(current)
         if event is not None and (event.end_s - event.start_s) >= min_note_duration_s:
             events.append(event)
@@ -189,6 +199,29 @@ def _resolve_lyrics_source_audio_path(
 
 def _format_time_range(start_s: float, end_s: float) -> str:
     return f"{start_s:.3f}-{end_s:.3f}"
+
+
+def _distribute_empty_token_windows(
+    left_t: float,
+    right_t: float,
+    count: int,
+) -> list[tuple[float, float]]:
+    if count <= 0:
+        return []
+
+    gap_duration = max(0.0, right_t - left_t)
+    if gap_duration == 0.0:
+        step = 1e-3
+        left_t = max(0.0, left_t - (count * step) / 2.0)
+        right_t = left_t + count * step
+        gap_duration = right_t - left_t
+
+    windows: list[tuple[float, float]] = []
+    for offset in range(count):
+        token_start_s = left_t + gap_duration * (offset / count)
+        token_end_s = left_t + gap_duration * ((offset + 1) / count)
+        windows.append((float(token_start_s), float(token_end_s)))
+    return windows
 
 
 def _normalize_token_index(token_index: int, token_count: int) -> int:
@@ -272,6 +305,7 @@ def _resolve_lyrics_token_source(
     pitch_jump_semitones: float,
     max_unvoiced_gap_s: float,
     min_note_duration_s: float,
+    min_note_confidence: float | None,
     token_index: int,
 ) -> tuple[str | Path, int, LyricTokenNotes]:
     source_audio_path = _resolve_lyrics_source_audio_path(
@@ -296,6 +330,7 @@ def _resolve_lyrics_token_source(
             pitch_jump_semitones=pitch_jump_semitones,
             max_unvoiced_gap_s=max_unvoiced_gap_s,
             min_note_duration_s=min_note_duration_s,
+            min_note_confidence=min_note_confidence,
         )
     else:
         aligned = list(source)
@@ -324,7 +359,11 @@ def align_tokens_to_notes(tokens: Sequence[str], notes: Sequence[NoteEvent]) -> 
 
     weights = _token_weights(token_list)
     weight_sum = sum(weights)
-    expected = [n * w / weight_sum for w in weights]
+    expected_counts = [n * w / weight_sum for w in weights]
+    note_durations = [max(0.0, note.end_s - note.start_s) for note in note_list]
+    total_note_duration = sum(note_durations)
+    duration_scale = max(total_note_duration / max(n, 1), 1e-6)
+    expected_durations = [total_note_duration * w / weight_sum for w in weights]
 
     inf = float("inf")
     dp = [[inf] * (n + 1) for _ in range(m + 1)]
@@ -340,9 +379,12 @@ def align_tokens_to_notes(tokens: Sequence[str], notes: Sequence[NoteEvent]) -> 
                 if base == inf:
                     continue
                 seg_len = j - p
-                penalty = (seg_len - expected[i - 1]) ** 2
+                seg_duration = sum(note_durations[p:j])
+                count_penalty = (seg_len - expected_counts[i - 1]) ** 2
+                duration_penalty = ((seg_duration - expected_durations[i - 1]) / duration_scale) ** 2
+                penalty = duration_penalty + 0.25 * count_penalty
                 if seg_len == 0:
-                    penalty += 0.5
+                    penalty += 0.75
                 score = base + penalty
                 if score < best:
                     best = score
@@ -358,26 +400,44 @@ def align_tokens_to_notes(tokens: Sequence[str], notes: Sequence[NoteEvent]) -> 
         j = p
 
     aligned: list[LyricTokenNotes] = []
-    for idx, token in enumerate(token_list):
+    idx = 0
+    while idx < m:
         start_idx, end_idx = ranges[idx]
         seg = tuple(note_list[start_idx:end_idx])
         if seg:
-            start_s = seg[0].start_s
-            end_s = seg[-1].end_s
-        else:
-            left_t = note_list[start_idx - 1].end_s if start_idx > 0 else note_list[0].start_s
-            right_t = note_list[start_idx].start_s if start_idx < n else note_list[-1].end_s
-            midpoint = (left_t + right_t) / 2.0
-            start_s = midpoint
-            end_s = midpoint
-        aligned.append(
-            LyricTokenNotes(
-                token=token,
-                start_s=float(start_s),
-                end_s=float(end_s),
-                notes=seg,
+            aligned.append(
+                LyricTokenNotes(
+                    token=token_list[idx],
+                    start_s=float(seg[0].start_s),
+                    end_s=float(seg[-1].end_s),
+                    notes=seg,
+                )
             )
-        )
+            idx += 1
+            continue
+
+        gap_start = idx
+        gap_note_idx = start_idx
+        while idx < m and ranges[idx] == (gap_note_idx, gap_note_idx):
+            idx += 1
+        gap_end = idx
+
+        left_t = note_list[gap_note_idx - 1].end_s if gap_note_idx > 0 else note_list[0].start_s
+        right_t = note_list[gap_note_idx].start_s if gap_note_idx < n else note_list[-1].end_s
+        gap_size = gap_end - gap_start
+        windows = _distribute_empty_token_windows(left_t, right_t, gap_size)
+
+        for token_pos, (token_start_s, token_end_s) in zip(
+            range(gap_start, gap_end), windows, strict=True
+        ):
+            aligned.append(
+                LyricTokenNotes(
+                    token=token_list[token_pos],
+                    start_s=float(token_start_s),
+                    end_s=float(token_end_s),
+                    notes=tuple(),
+                )
+            )
     return aligned
 
 
@@ -394,6 +454,7 @@ def extract_lyrics_note_mapping(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
 ) -> list[LyricTokenNotes]:
     """
     Map user-provided lyrics text to detected sung note events.
@@ -414,6 +475,7 @@ def extract_lyrics_note_mapping(
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
+        min_note_confidence=min_note_confidence,
     )
     return align_tokens_to_notes(tokens, note_events)
 
@@ -453,6 +515,7 @@ def extract_lyrics_note_rows(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
 ) -> list[dict[str, float | int | list[float] | list[str] | str]]:
     """
     One-call helper that returns printable token-note rows.
@@ -469,6 +532,7 @@ def extract_lyrics_note_rows(
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
+        min_note_confidence=min_note_confidence,
     )
     return lyrics_note_rows(aligned)
 
@@ -486,6 +550,7 @@ def print_lyrics_notes(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
 ) -> list[dict[str, float | int | list[float] | list[str] | str]]:
     """
     One-call helper that computes and prints token-note rows.
@@ -502,6 +567,7 @@ def print_lyrics_notes(
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
+        min_note_confidence=min_note_confidence,
     )
     for row in rows:
         print(row)
@@ -597,6 +663,7 @@ def inspect_lyrics_token(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
     preview_pad_s: float = 0.05,
     min_preview_duration_s: float = 0.25,
 ) -> LyricTokenInspection:
@@ -621,6 +688,7 @@ def inspect_lyrics_token(
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
+        min_note_confidence=min_note_confidence,
         token_index=token_index,
     )
 
@@ -670,6 +738,7 @@ def play_lyrics_token(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
     preview_pad_s: float = 0.05,
     min_preview_duration_s: float = 0.25,
 ) -> object:
@@ -692,6 +761,7 @@ def play_lyrics_token(
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
+        min_note_confidence=min_note_confidence,
         preview_pad_s=preview_pad_s,
         min_preview_duration_s=min_preview_duration_s,
     )
@@ -716,6 +786,7 @@ def extract_lyrics_notes_df(
     pitch_jump_semitones: float = 0.8,
     max_unvoiced_gap_s: float = 0.05,
     min_note_duration_s: float = 0.05,
+    min_note_confidence: float | None = 0.6,
     explode_notes: bool = True,
 ) -> pd.DataFrame:
     """
@@ -733,5 +804,6 @@ def extract_lyrics_notes_df(
         pitch_jump_semitones=pitch_jump_semitones,
         max_unvoiced_gap_s=max_unvoiced_gap_s,
         min_note_duration_s=min_note_duration_s,
+        min_note_confidence=min_note_confidence,
     )
     return lyrics_note_dataframe(aligned, explode_notes=explode_notes)

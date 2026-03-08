@@ -156,6 +156,20 @@ Passing the existing `df` avoids recomputing alignment just to inspect one token
 `play_lyrics_token(...)` prefers a local player such as `afplay`/`ffplay`; if no
 CLI player is available, it falls back to `IPython.display.Audio`.
 
+If you still see short fake notes from piano bleed or noise, try:
+
+```python
+df = extract_lyrics_notes_df(
+    file,
+    lyrics,
+    separate_vocals=True,
+    min_note_confidence=0.75,
+    explode_notes=False,
+)
+```
+
+`min_note_confidence` filters weak pYIN note detections before lyric alignment.
+
 Each row contains:
 
 - `token`

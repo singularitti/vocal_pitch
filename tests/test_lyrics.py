@@ -1,6 +1,7 @@
 import vocal_pitch.lyrics as lyrics
 import pandas as pd
 import numpy as np
+import pytest
 from vocal_pitch.models import AudioClip, LyricTokenInspection, LyricTokenNotes, NoteEvent, PitchFrame
 
 
@@ -36,6 +37,25 @@ def test_detect_note_events_split_by_pitch_jump() -> None:
     assert events[1].note_name == "C5"
 
 
+def test_detect_note_events_filters_low_confidence_noise() -> None:
+    contour = [
+        PitchFrame(time_s=0.00, frequency_hz=440.0, confidence=0.15),
+        PitchFrame(time_s=0.01, frequency_hz=441.0, confidence=0.2),
+        PitchFrame(time_s=0.02, frequency_hz=None, confidence=None),
+        PitchFrame(time_s=0.03, frequency_hz=523.25, confidence=0.95),
+        PitchFrame(time_s=0.04, frequency_hz=523.0, confidence=0.92),
+    ]
+    events = lyrics.detect_note_events(
+        contour,
+        pitch_jump_semitones=0.8,
+        max_unvoiced_gap_s=0.05,
+        min_note_duration_s=0.0,
+        min_note_confidence=0.6,
+    )
+    assert len(events) == 1
+    assert events[0].note_name == "C5"
+
+
 def test_align_tokens_to_notes_one_to_many() -> None:
     notes = [
         NoteEvent(0.0, 0.1, 440.0, 440.0, 69.0, "A4", 4),
@@ -47,6 +67,26 @@ def test_align_tokens_to_notes_one_to_many() -> None:
     assert len(aligned) == 2
     assert len(aligned[0].notes) == 1
     assert [n.note_name for n in aligned[1].notes] == ["B4", "C5", "D5"]
+
+
+def test_align_tokens_to_notes_prefers_duration_over_raw_note_count() -> None:
+    notes = [
+        NoteEvent(0.0, 0.02, 440.0, 440.0, 69.0, "A4", 2),
+        NoteEvent(0.02, 0.04, 466.16, 466.16, 70.0, "A#4", 2),
+        NoteEvent(0.04, 0.5, 493.88, 493.88, 71.0, "B4", 10),
+    ]
+
+    aligned = lyrics.align_tokens_to_notes(["你", "好"], notes)
+
+    assert [note.note_name for note in aligned[0].notes] == ["A4", "A#4"]
+    assert [note.note_name for note in aligned[1].notes] == ["B4"]
+
+
+def test_distribute_empty_token_windows_spreads_gap() -> None:
+    windows = lyrics._distribute_empty_token_windows(0.2, 0.4, 2)
+
+    assert windows[0] == pytest.approx((0.2, 0.3))
+    assert windows[1] == pytest.approx((0.3, 0.4))
 
 
 def test_extract_lyrics_note_rows_wrapper(monkeypatch) -> None:
